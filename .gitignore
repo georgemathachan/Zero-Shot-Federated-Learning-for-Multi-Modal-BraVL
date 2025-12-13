@@ -1,0 +1,11 @@
+# Data
+data/
+*.mat
+*.h5
+*.npy
+# Python
+__pycache__/
+*.pyc
+.env
+.venv/
+venv/
