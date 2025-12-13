@@ -46,6 +46,43 @@ def zsl_contrastive_loss(emb_v, prototypes, labels, tau=0.1):
     return loss
 
 # -----------------------------
+# PyTorch ZSL client training loop (FedAvg client)
+# -----------------------------
+def client_train_zsl(Xk, yk, prototypes_dict, lr=0.01, epochs=50, batch_size=32):
+    """
+    Train local ZSL mapping using contrastive loss (FedAvg client).
+    Xk: np.ndarray (n_samples, feature_dim)
+    yk: np.ndarray (n_samples,) class labels
+    prototypes_dict: dict {class_id: prototype_vector}
+    Returns: (W_np, n_samples) where W_np has shape (input_dim, sem_dim)
+    """
+    Xk = torch.tensor(Xk, dtype=torch.float32, device=device)
+    yk = torch.tensor(yk, dtype=torch.long, device=device)
+
+    input_dim = Xk.shape[1]
+    sem_dim = list(prototypes_dict.values())[0].shape[0]
+    W = nn.Linear(input_dim, sem_dim, bias=False).to(device)
+
+    optimizer = torch.optim.Adam(W.parameters(), lr=lr)
+
+    dataset = torch.utils.data.TensorDataset(Xk, yk)
+    loader = torch.utils.data.DataLoader(dataset, batch_size=batch_size, shuffle=True)
+
+    for epoch in range(epochs):
+        epoch_loss = 0.0
+        for xb, yb in loader:
+            optimizer.zero_grad()
+            emb_v = W(xb)
+            loss = zsl_contrastive_loss(emb_v, prototypes_dict, yb, tau=tau)
+            loss.backward()
+            optimizer.step()
+            epoch_loss += loss.item() * xb.shape[0]
+        if (epoch + 1) % 10 == 0:
+            print(f"Epoch {epoch+1}/{epochs}, Loss: {epoch_loss / len(Xk):.4f}")
+
+    return W.weight.data.cpu().numpy().T, int(yk.shape[0])
+
+# -----------------------------
 # 1. Set paths and subject info
 # -----------------------------
 data_dir_root = './data/ThingsEEG-Text'
