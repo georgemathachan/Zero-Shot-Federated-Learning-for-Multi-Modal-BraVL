@@ -11,6 +11,39 @@ from sklearn.neighbors import KNeighborsClassifier
 from sklearn.metrics import accuracy_score, f1_score
 from sklearn.metrics.pairwise import cosine_similarity
 import torch
+import torch.nn as nn
+import torch.nn.functional as F
+
+# Hyperparameters
+tau = 0.1
+device = 'cuda' if torch.cuda.is_available() else 'cpu'
+
+def zsl_contrastive_loss(emb_v, prototypes, labels, tau=0.1):
+    """
+    Compute contrastive ZSL loss for a batch.
+
+    emb_v: (batch_size, emb_dim) visual embeddings
+    prototypes: dict {class_id: prototype_vector}
+    labels: (batch_size,) true class labels
+    tau: temperature
+    """
+    batch_size = emb_v.shape[0]
+    emb_v = F.normalize(emb_v, dim=1)
+
+    class_ids = sorted(prototypes.keys())
+    proto_matrix = torch.stack([
+        torch.tensor(prototypes[c], device=device, dtype=torch.float32)
+        for c in class_ids
+    ])
+    proto_matrix = F.normalize(proto_matrix, dim=1)
+
+    sim = torch.matmul(emb_v, proto_matrix.T) / tau
+
+    label_to_idx = {c: i for i, c in enumerate(class_ids)}
+    target_idx = torch.tensor([label_to_idx[int(l)] for l in labels], device=device)
+
+    loss = F.cross_entropy(sim, target_idx)
+    return loss
 
 # -----------------------------
 # 1. Set paths and subject info
@@ -224,11 +257,11 @@ print(classification_report(y_unseen, y_pred))
 def compute_prototypes(text_feats, labels):
     """
     Compute semantic prototypes (mean embeddings) for each class.
-    
+
     Args:
         text_feats: (n_samples, feature_dim) text feature matrix
         labels: (n_samples,) class labels
-    
+
     Returns:
         prototypes: dict mapping class_id -> prototype_vector
     """
@@ -257,7 +290,7 @@ print("First 5 values:", prototypes_seen[first_class][:5])
 # =============================
 # Step 2 — Define Mapping Network (Encoder) for Local Training
 # =============================
-# Learn a linear mapping from concatenated features (image+text or brain+image+text) 
+# Learn a linear mapping from concatenated features (image+text or brain+image+text)
 # to semantic space: W*x ≈ s_y
 # Use ridge regression to map feature space → semantic prototype space
 
@@ -266,11 +299,11 @@ from sklearn.linear_model import Ridge
 def create_semantic_targets(labels, prototypes):
     """
     Create semantic target vectors for each sample based on its class label.
-    
+
     Args:
         labels: (n_samples,) class labels
         prototypes: dict mapping class_id -> prototype_vector
-    
+
     Returns:
         S_targets: (n_samples, sem_dim) semantic embedding targets
     """
@@ -333,72 +366,72 @@ def client_train_ridge(Xk, yk, prototypes_dict, alpha=1.0):
     """
     Train local ridge regression model on client data.
     Maps features Xk → semantic prototype space.
-    
+
     Args:
         Xk: (n_k, input_dim) local feature matrix
         yk: (n_k,) local labels
         prototypes_dict: dict mapping class_id → prototype_vector
         alpha: ridge regularization parameter
-    
+
     Returns:
         Wk: (input_dim, sem_dim) local mapping matrix
         nk: number of local samples
     """
     # Build per-sample semantic targets: for each sample with label y -> prototype_dict[y]
     S = np.vstack([prototypes_dict[int(lbl)] for lbl in yk])
-    
+
     model = Ridge(alpha=alpha, fit_intercept=False)
     model.fit(Xk, S)  # fits W: Xk @ W ≈ S
     Wk = model.coef_.T  # shape: (input_dim, sem_dim)
     nk = len(yk)
-    
+
     return Wk, nk
 
 def fedavg_train(client_splits_X, client_splits_y, prototypes_dict, rounds=5, alpha=1.0):
     """
     Federated Averaging (FedAvg) for semantic mapping network.
-    
+
     Args:
         client_splits_X: list of (n_k, input_dim) feature matrices
         client_splits_y: list of (n_k,) label arrays
         prototypes_dict: dict mapping class_id → prototype_vector
         rounds: number of communication rounds
         alpha: ridge regularization parameter
-    
+
     Returns:
         W_global: (input_dim, sem_dim) aggregated global mapping matrix
     """
     n_total = sum([len(y) for y in client_splits_y])
     num_clients = len(client_splits_X)
-    
+
     # Initialize global W
     input_dim = client_splits_X[0].shape[1]
     sem_dim = list(prototypes_dict.values())[0].shape[0]
     W_global = np.zeros((input_dim, sem_dim))
-    
+
     print("\n=== Federated Training (FedAvg) ===")
     print(f"Number of clients: {num_clients}")
     print(f"Total samples: {n_total}")
     print(f"Communication rounds: {rounds}")
     print(f"Ridge alpha: {alpha}")
-    
+
     for r in range(rounds):
         Ws = []
         ns = []
-        
+
         # Local training on each client
         for k, (Xk, yk) in enumerate(zip(client_splits_X, client_splits_y)):
             Wk, nk = client_train_ridge(Xk, yk, prototypes_dict, alpha=alpha)
             Ws.append(Wk)
             ns.append(nk)
-        
+
         # Server aggregation: weighted average
         W_global = np.zeros_like(Ws[0])
         for Wk, nk in zip(Ws, ns):
             W_global += Wk * (nk / n_total)
-        
+
         print(f"Round {r+1}/{rounds}: Aggregated W_global shape {W_global.shape}")
-    
+
     return W_global
 
 # =============================
