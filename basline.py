@@ -5,10 +5,9 @@ import scipy.io as sio
 import numpy as np
 from sklearn.preprocessing import StandardScaler
 from sklearn.svm import SVC
-from sklearn.linear_model import LogisticRegression, Ridge
+from sklearn.linear_model import LogisticRegression
 from sklearn.neighbors import KNeighborsClassifier
 from sklearn.metrics import accuracy_score, f1_score, confusion_matrix, classification_report
-from sklearn.metrics.pairwise import cosine_similarity
 import torch
 import pandas as pd
 import matplotlib.pyplot as plt
@@ -41,7 +40,7 @@ def load_brain_data(file_path, time_slice=(27, 60)):
             raise KeyError(f"'data' key not found in {file_path}")
         if 'class_idx' not in mat:
             raise KeyError(f"'class_idx' key not found in {file_path}")
-        
+
         data = mat['data'].astype('double') * 2.0
         data = data[:, :, time_slice[0]:time_slice[1]]
         data = data.reshape(data.shape[0], -1)
@@ -140,8 +139,8 @@ else:
 # =============================
 try:
     print("\n=== Running mmbra Analysis ===")
-    mmbra.data_analysis_example(torch.from_numpy(brain_seen), 
-                                 torch.from_numpy(image_seen), 
+    mmbra.data_analysis_example(torch.from_numpy(brain_seen),
+                                 torch.from_numpy(image_seen),
                                  torch.from_numpy(text_seen))
     mmbra.data_visualization_example(torch.from_numpy(label_seen))
     mmbra.data_visualization_example(torch.from_numpy(label_unseen))
@@ -163,171 +162,16 @@ print("Baseline SVM Accuracy:", f"{acc_baseline:.4f}")
 print("Baseline SVM Macro F1:", f"{f1_baseline:.4f}")
 
 # =============================
-# Step 1: Compute Semantic Prototypes
+# 6. Baseline SVM Detailed Evaluation
 # =============================
-def compute_prototypes(text_feats, labels):
-    """Compute semantic prototypes (mean embeddings) for each class."""
-    classes = np.unique(labels)
-    prototypes = {}
-    for c in classes:
-        mask = labels == c
-        prototypes[c] = text_feats[mask].mean(axis=0)
-    return prototypes
-
-prototypes_seen = compute_prototypes(text_seen, y_seen)
-prototypes_unseen = compute_prototypes(text_unseen, y_unseen)
-
-print("\n=== Semantic Prototypes ===")
-print("Seen class prototypes:", len(prototypes_seen))
-print("Unseen class prototypes:", len(prototypes_unseen))
-proto_dim = list(prototypes_seen.values())[0].shape[0]
-print("Prototype dimension:", proto_dim)
-
-first_class = list(prototypes_seen.keys())[0]
-print(f"Example prototype (class {first_class}, first 5 dims):", prototypes_seen[first_class][:5])
-
-# =============================
-# Step 2: Train Local Mapping Network
-# =============================
-def create_semantic_targets(labels, prototypes):
-    """Create semantic target vectors for each sample."""
-    sem_dim = list(prototypes.values())[0].shape[0]
-    S_targets = np.zeros((len(labels), sem_dim))
-    for i, label in enumerate(labels):
-        S_targets[i] = prototypes[label]
-    return S_targets
-
-S_seen = create_semantic_targets(y_seen, prototypes_seen)
-S_seen = check_array(S_seen, "S_seen")
-
-print("\n=== Semantic Targets ===")
-print("S_seen shape:", S_seen.shape)
-print("First sample target (first 5 dims):", S_seen[0, :5])
-
-# Ridge regression: map X -> semantic space
-print("\n=== Training Mapping Network (Ridge Regression) ===")
-ridge = Ridge(alpha=1.0)
-ridge.fit(X_seen, S_seen)
-
-W_mapping = ridge.coef_.T
-b_mapping = ridge.intercept_
-
-print("Mapping matrix W shape:", W_mapping.shape)
-print("Input dim:", X_seen.shape[1], "→ Semantic dim:", S_seen.shape[1])
-
-S_pred_seen = X_seen @ W_mapping + b_mapping
-mse_train = np.mean((S_pred_seen - S_seen) ** 2)
-print(f"Training MSE: {mse_train:.6f}")
-
-# =============================
-# Step 3: Federated Training (FedAvg)
-# =============================
-def client_train_ridge(Xk, yk, prototypes_dict, alpha=1.0):
-    """Train local ridge regression model."""
-    S = np.vstack([prototypes_dict[int(lbl)] for lbl in yk])
-    model = Ridge(alpha=alpha, fit_intercept=False)
-    model.fit(Xk, S)
-    return model.coef_.T, len(yk)
-
-def fedavg_train(client_splits_X, client_splits_y, prototypes_dict, rounds=3, alpha=1.0):
-    """Federated Averaging training."""
-    n_total = sum([len(y) for y in client_splits_y])
-    num_clients = len(client_splits_X)
-    
-    input_dim = client_splits_X[0].shape[1]
-    sem_dim = list(prototypes_dict.values())[0].shape[0]
-    W_global = np.zeros((input_dim, sem_dim))
-    
-    print("\n=== Federated Training (FedAvg) ===")
-    print(f"Clients: {num_clients}, Rounds: {rounds}, Total samples: {n_total}")
-    
-    for r in range(rounds):
-        Ws, ns = [], []
-        for k, (Xk, yk) in enumerate(zip(client_splits_X, client_splits_y)):
-            Wk, nk = client_train_ridge(Xk, yk, prototypes_dict, alpha=alpha)
-            Ws.append(Wk)
-            ns.append(nk)
-        
-        W_global = np.zeros_like(Ws[0])
-        for Wk, nk in zip(Ws, ns):
-            W_global += Wk * (nk / n_total)
-        
-        print(f"Round {r+1}/{rounds}: W_global aggregated")
-    
-    return W_global
-
-# Create client splits (simple stratified split)
-num_clients = 3
-indices = np.arange(len(y_seen))
-np.random.shuffle(indices)
-client_splits = np.array_split(indices, num_clients)
-client_X = [X_seen[split] for split in client_splits]
-client_y = [y_seen[split] for split in client_splits]
-
-print(f"\nClient data distribution: {[len(y) for y in client_y]}")
-
-# Train FedAvg
-W_global = fedavg_train(client_X, client_y, prototypes_seen, rounds=3, alpha=1.0)
-
-print("\n=== Global Mapping Network ===")
-print("W_global shape:", W_global.shape)
-
-S_pred_global = X_seen @ W_global
-mse_global = np.mean((S_pred_global - S_seen) ** 2)
-print(f"Global model MSE on seen data: {mse_global:.6f}")
-
-# =============================
-# Step 4: Zero-Shot Prediction
-# =============================
-print("\n=== Zero-Shot Prediction ===")
-
-# Check shapes before multiplication
-if X_unseen.shape[1] != W_global.shape[0]:
-    raise ValueError(f"Shape mismatch: X_unseen {X_unseen.shape[1]} vs W_global {W_global.shape[0]}")
-
-Z_unseen = X_unseen @ W_global
-Z_unseen = check_array(Z_unseen, "Z_unseen")
-
-print("Mapped embeddings Z_unseen shape:", Z_unseen.shape)
-
-labels_unseen_sorted = sorted(prototypes_unseen.keys())
-P_unseen = np.vstack([prototypes_unseen[c] for c in labels_unseen_sorted])
-
-print("Unseen prototypes shape:", P_unseen.shape)
-print("Number of unseen classes:", len(labels_unseen_sorted))
-
-sim_matrix = cosine_similarity(Z_unseen, P_unseen)
-indices = sim_matrix.argmax(axis=1)
-y_pred_zsl = np.array([labels_unseen_sorted[i] for i in indices])
-
-print("ZSL predictions (first 10):", y_pred_zsl[:10])
-print("True labels (first 10):    ", y_unseen[:10])
-
-# =============================
-# 5. Evaluation: ZSL vs Baseline
-# =============================
-acc_zsl = accuracy_score(y_unseen, y_pred_zsl)
-f1_zsl = f1_score(y_unseen, y_pred_zsl, average='macro', zero_division=0)
+cm_baseline = confusion_matrix(y_unseen, y_pred_baseline)
+print(f"\nConfusion Matrix shape: {cm_baseline.shape}")
 
 print("\n" + "="*60)
-print("=== ZERO-SHOT LEARNING EVALUATION ===")
+print("=== BASELINE SVM DETAILED EVALUATION ===")
 print("="*60)
-print(f"Accuracy:  {acc_zsl:.4f}")
-print(f"Macro F1:  {f1_zsl:.4f}")
-print("="*60)
-
-cm_zsl = confusion_matrix(y_unseen, y_pred_zsl)
-print(f"\nConfusion Matrix shape: {cm_zsl.shape}")
-
 print("\nClassification Report:\n")
-print(classification_report(y_unseen, y_pred_zsl, zero_division=0))
-
-print("\n" + "="*60)
-print("=== COMPARISON: BASELINE SVM vs ZERO-SHOT (FedAvg) ===")
-print("="*60)
-print(f"Baseline SVM Accuracy:       {acc_baseline:.4f}")
-print(f"Zero-Shot (FedAvg) Accuracy: {acc_zsl:.4f}")
-print(f"Improvement:                 {acc_zsl - acc_baseline:+.4f}")
+print(classification_report(y_unseen, y_pred_baseline, zero_division=0))
 print("="*60)
 
 # =============================
@@ -338,21 +182,21 @@ def plot_embeddings(X, y, title="Embedding Visualization", method="PCA", perplex
     X = np.asarray(X)
     y = np.asarray(y)
     n = X.shape[0]
-    
+
     if n > max_samples:
         rng = np.random.default_rng(0)
         idx = rng.choice(n, size=max_samples, replace=False)
         X_sub, y_sub = X[idx], y[idx]
     else:
         X_sub, y_sub = X, y
-    
+
     if method == "PCA":
         reducer = PCA(n_components=2, random_state=0)
     elif method == "t-SNE":
         reducer = TSNE(n_components=2, random_state=42, perplexity=min(perplexity, len(np.unique(y_sub))-1))
     else:
         raise ValueError("Method must be 'PCA' or 't-SNE'")
-    
+
     try:
         X_reduced = reducer.fit_transform(X_sub)
         plt.figure(figsize=(8, 6))
