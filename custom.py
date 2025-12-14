@@ -83,6 +83,34 @@ def client_train_zsl(Xk, yk, prototypes_dict, lr=0.01, epochs=50, batch_size=32)
     return W.weight.data.cpu().numpy().T, int(yk.shape[0])
 
 # -----------------------------
+# FedAvg orchestration for ZSL clients
+# -----------------------------
+def fedavg_train_zsl(client_splits_X, client_splits_y, prototypes_dict, rounds=3, lr=0.01, epochs=50):
+    """
+    Federated Averaging for ZSL mapping.
+    Aggregates client-trained linear mappings using sample-count weights.
+    Returns W_global with shape (input_dim, sem_dim).
+    """
+    n_total = sum([len(y) for y in client_splits_y])
+    num_clients = len(client_splits_X)
+
+    input_dim = client_splits_X[0].shape[1]
+    sem_dim = list(prototypes_dict.values())[0].shape[0]
+    W_global = np.zeros((input_dim, sem_dim))
+
+    for r in range(rounds):
+        Ws = []
+        ns = []
+        print(f"\n--- FedAvg Round {r+1}/{rounds} ---")
+        for k, (Xk, yk) in enumerate(zip(client_splits_X, client_splits_y)):
+            Wk, nk = client_train_zsl(Xk, yk, prototypes_dict, lr=lr, epochs=epochs)
+            Ws.append(Wk)
+            ns.append(nk)
+        W_global = sum(Wk * (nk / n_total) for Wk, nk in zip(Ws, ns))
+
+    return W_global
+
+# -----------------------------
 # 1. Set paths and subject info
 # -----------------------------
 data_dir_root = './data/ThingsEEG-Text'
@@ -399,77 +427,11 @@ for i in range(min(3, len(y_seen))):
 #   - Server aggregates: W_global = weighted average of W_k
 #   - (Optional) broadcast new W and repeat for multiple rounds
 
-def client_train_ridge(Xk, yk, prototypes_dict, alpha=1.0):
-    """
-    Train local ridge regression model on client data.
-    Maps features Xk → semantic prototype space.
-
-    Args:
-        Xk: (n_k, input_dim) local feature matrix
-        yk: (n_k,) local labels
-        prototypes_dict: dict mapping class_id → prototype_vector
-        alpha: ridge regularization parameter
-
-    Returns:
-        Wk: (input_dim, sem_dim) local mapping matrix
-        nk: number of local samples
-    """
-    # Build per-sample semantic targets: for each sample with label y -> prototype_dict[y]
-    S = np.vstack([prototypes_dict[int(lbl)] for lbl in yk])
-
-    model = Ridge(alpha=alpha, fit_intercept=False)
-    model.fit(Xk, S)  # fits W: Xk @ W ≈ S
-    Wk = model.coef_.T  # shape: (input_dim, sem_dim)
-    nk = len(yk)
-
-    return Wk, nk
-
-def fedavg_train(client_splits_X, client_splits_y, prototypes_dict, rounds=5, alpha=1.0):
-    """
-    Federated Averaging (FedAvg) for semantic mapping network.
-
-    Args:
-        client_splits_X: list of (n_k, input_dim) feature matrices
-        client_splits_y: list of (n_k,) label arrays
-        prototypes_dict: dict mapping class_id → prototype_vector
-        rounds: number of communication rounds
-        alpha: ridge regularization parameter
-
-    Returns:
-        W_global: (input_dim, sem_dim) aggregated global mapping matrix
-    """
-    n_total = sum([len(y) for y in client_splits_y])
-    num_clients = len(client_splits_X)
-
-    # Initialize global W
-    input_dim = client_splits_X[0].shape[1]
-    sem_dim = list(prototypes_dict.values())[0].shape[0]
-    W_global = np.zeros((input_dim, sem_dim))
-
-    print("\n=== Federated Training (FedAvg) ===")
-    print(f"Number of clients: {num_clients}")
-    print(f"Total samples: {n_total}")
-    print(f"Communication rounds: {rounds}")
-    print(f"Ridge alpha: {alpha}")
-
-    for r in range(rounds):
-        Ws = []
-        ns = []
-
-        # Local training on each client
-        for k, (Xk, yk) in enumerate(zip(client_splits_X, client_splits_y)):
-            Wk, nk = client_train_ridge(Xk, yk, prototypes_dict, alpha=alpha)
-            Ws.append(Wk)
-            ns.append(nk)
-
-        # Server aggregation: weighted average
-        W_global = np.zeros_like(Ws[0])
-        for Wk, nk in zip(Ws, ns):
-            W_global += Wk * (nk / n_total)
-
-        print(f"Round {r+1}/{rounds}: Aggregated W_global shape {W_global.shape}")
-
-    return W_global
+from numpy import ndarray
+# Use the PyTorch-based FedAvg ZSL trainer defined earlier
+def fedavg_train(client_splits_X, client_splits_y, prototypes_dict, rounds=3, lr=0.01, epochs=50):
+    """Wrapper to call fedavg_train_zsl with explicit lr/epochs."""
+    return fedavg_train_zsl(client_splits_X, client_splits_y, prototypes_dict, rounds=rounds, lr=lr, epochs=epochs)
 
 # =============================
 # Execute FedAvg Training
@@ -483,7 +445,7 @@ for k, (Xk, yk) in enumerate(zip(client_X, client_y)):
     print(f"Client {k}: {len(yk)} samples, {Xk.shape[1]} features")
 
 # Run FedAvg with 3 communication rounds
-W_global = fedavg_train(client_X, client_y, prototypes_seen, rounds=3, alpha=1.0)
+W_global = fedavg_train(client_X, client_y, prototypes_seen, rounds=3, lr=0.01, epochs=50)
 
 print("\n=== Global Mapping Network ===")
 print("W_global shape:", W_global.shape)
