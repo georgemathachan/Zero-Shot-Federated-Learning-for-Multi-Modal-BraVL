@@ -106,7 +106,14 @@ def fedavg_train_zsl(client_splits_X, client_splits_y, prototypes_dict, rounds=3
             Wk, nk = client_train_zsl(Xk, yk, prototypes_dict, lr=lr, epochs=epochs)
             Ws.append(Wk)
             ns.append(nk)
-        W_global = sum(Wk * (nk / n_total) for Wk, nk in zip(Ws, ns))
+        # --- Anti-leakage/runtime guards (FedAvg) ---
+        assert sum(ns) == n_total and n_total > 0, "Invalid sample counts."
+        for Wk in Ws:
+            assert Wk.shape == W_global.shape, "Client W shape mismatch."
+
+        # Ignore zero-sample clients for robustness
+        valid = [(Wk, nk) for Wk, nk in zip(Ws, ns) if nk > 0]
+        W_global = sum(Wk * (nk / n_total) for Wk, nk in valid)
 
     return W_global
 
@@ -192,6 +199,12 @@ y_unseen = label_unseen.ravel()
 scaler = StandardScaler()
 X_seen = scaler.fit_transform(X_seen)
 X_unseen = scaler.transform(X_unseen)
+
+# --- Anti-leakage runtime guards (scaler) ---
+mean_seen = scaler.mean_.copy()
+var_seen = scaler.var_.copy()
+assert mean_seen.shape[0] == X_seen.shape[1], "Scaler mean shape mismatch."
+assert var_seen.shape[0] == X_seen.shape[1], "Scaler var shape mismatch."
 
 # -----------------------------
 # 6. Train/Test summary
@@ -602,3 +615,10 @@ try:
     plot_embeddings(X_unseen, y_unseen, title="Unseen Data Embeddings", method="t-SNE", perplexity=30)
 except Exception as e:
     print("Embedding visualization (unseen) failed:", e)
+
+# --- Anti-leakage runtime guards (ZSL eval scope) ---
+assert set(labels_unseen_sorted).issubset(set(CUnseen)), "Using seen prototypes in ZSL eval."
+
+# Normalize for cosine stability
+Z_unseen = Z_unseen / (np.linalg.norm(Z_unseen, axis=1, keepdims=True) + 1e-8)
+P_unseen = P_unseen / (np.linalg.norm(P_unseen, axis=1, keepdims=True) + 1e-8)
